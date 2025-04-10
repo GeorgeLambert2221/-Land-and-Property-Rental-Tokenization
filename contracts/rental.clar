@@ -220,3 +220,63 @@
 (define-read-only (get-rental-period (property principal) (tenant principal))
     (map-get? rental-duration {property: property, tenant: tenant}))
 
+
+(define-map referral-rewards 
+    {referrer: principal, property: principal} 
+    uint)
+
+(define-map referral-codes 
+    (string-ascii 10) 
+    {creator: principal, property: principal})
+
+(define-public (create-referral-code (property principal) (code (string-ascii 10)))
+    (let ((sender tx-sender))
+        (asserts! (is-property-owner sender) (err u20))
+        (ok (map-set referral-codes 
+            code 
+            {creator: sender, 
+             property: property}))))
+
+(define-public (rent-with-referral (property principal) (token-amount uint) (ref-code (string-ascii 10)))
+    (let ((sender tx-sender)
+          (ref-data (unwrap! (map-get? referral-codes ref-code) (err u21)))
+          (reward-amount u100))
+        (try! (purchase-tokens property token-amount))
+        (try! (stx-transfer? reward-amount property (get creator ref-data)))
+        (map-set referral-rewards 
+            {referrer: (get creator ref-data), property: property}
+            (+ (default-to u0 (map-get? referral-rewards {referrer: (get creator ref-data), property: property})) 
+               reward-amount))
+        (ok true)))
+
+
+(define-map property-occupancy
+    principal
+    {total-days: uint,
+     occupied-days: uint,
+     last-updated: uint})
+
+(define-public (initialize-occupancy (property principal))
+    (let ((sender tx-sender))
+        (asserts! (is-property-owner sender) (err u22))
+        (ok (map-set property-occupancy
+            property
+            {total-days: u0,
+             occupied-days: u0,
+             last-updated: stacks-block-height}))))
+
+(define-public (update-occupancy (property principal) (is-occupied bool))
+    (let ((sender tx-sender)
+          (current-data (unwrap! (map-get? property-occupancy property) (err u23)))
+          (days-since-update (- stacks-block-height (get last-updated current-data))))
+        (asserts! (is-property-owner sender) (err u24))
+        (ok (map-set property-occupancy
+            property
+            {total-days: (+ (get total-days current-data) days-since-update),
+             occupied-days: (+ (get occupied-days current-data) 
+                             (if is-occupied days-since-update u0)),
+             last-updated: stacks-block-height}))))
+
+(define-read-only (get-occupancy-rate (property principal))
+    (let ((data (unwrap! (map-get? property-occupancy property) (err u25))))
+        (ok (/ (* (get occupied-days data) u100) (get total-days data)))))

@@ -280,3 +280,60 @@
 (define-read-only (get-occupancy-rate (property principal))
     (let ((data (unwrap! (map-get? property-occupancy property) (err u25))))
         (ok (/ (* (get occupied-days data) u100) (get total-days data)))))
+
+(define-map payment-schedules
+    principal
+    {interval: uint,
+     amount: uint,
+     next-due: uint})
+
+(define-map payment-history
+    {property: principal, tenant: principal}
+    (list 10 {timestamp: uint, amount: uint}))
+
+(define-public (set-payment-schedule (property principal) (interval uint) (amount uint))
+    (let ((sender tx-sender))
+        (asserts! (is-property-owner sender) (err u100))
+        (ok (map-set payment-schedules 
+            property 
+            {interval: interval,
+             amount: amount,
+             next-due: (+ stacks-block-height interval)}))))
+
+(define-public (make-scheduled-payment (property principal))
+    (let ((sender tx-sender)
+          (schedule (unwrap! (map-get? payment-schedules property) (err u101)))
+          (current-history (default-to (list) (map-get? payment-history {property: property, tenant: sender}))))
+        (try! (stx-transfer? (get amount schedule) sender property))
+        (map-set payment-schedules property 
+            (merge schedule {next-due: (+ (get next-due schedule) (get interval schedule))}))
+        (ok (map-set payment-history 
+            {property: property, tenant: sender}
+            (unwrap-panic (as-max-len? (append current-history {timestamp: stacks-block-height, amount: (get amount schedule)}) u10))))))
+
+
+
+
+(define-map access-permissions
+    {property: principal, tenant: principal}
+    {active: bool, 
+     start-time: uint,
+     end-time: uint,
+     access-level: uint})
+
+(define-public (grant-access (property principal) (tenant principal) (duration uint) (level uint))
+    (let ((sender tx-sender))
+        (asserts! (is-property-owner sender) (err u200))
+        (ok (map-set access-permissions
+            {property: property, tenant: tenant}
+            {active: true,
+             start-time: stacks-block-height,
+             end-time: (+ stacks-block-height duration),
+             access-level: level}))))
+
+(define-read-only (check-access (property principal) (tenant principal))
+    (let ((access-data (unwrap! (map-get? access-permissions {property: property, tenant: tenant}) (err u201))))
+        (ok (and 
+            (get active access-data)
+            (>= (get end-time access-data) stacks-block-height)
+            (>= stacks-block-height (get start-time access-data))))))

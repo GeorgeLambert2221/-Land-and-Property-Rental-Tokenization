@@ -337,3 +337,111 @@
             (get active access-data)
             (>= (get end-time access-data) stacks-block-height)
             (>= stacks-block-height (get start-time access-data))))))
+
+
+(define-map rent-collection-settings
+    principal
+    {monthly-rent: uint,
+     due-day: uint,
+     late-fee-rate: uint,
+     grace-period: uint})
+
+(define-map tenant-rent-status
+    {property: principal, tenant: principal}
+    {last-payment: uint,
+     amount-due: uint,
+     late-fees: uint,
+     payment-status: (string-ascii 10)})
+
+(define-map rent-payment-ledger
+    {property: principal, tenant: principal, month: uint}
+    {amount-paid: uint,
+     payment-date: uint,
+     late-fee-charged: uint})
+
+(define-public (setup-rent-collection (property principal) (monthly-rent uint) (due-day uint) (late-fee-rate uint) (grace-period uint))
+    (let ((sender tx-sender))
+        (asserts! (is-property-owner sender) (err u300))
+        (asserts! (<= due-day u30) (err u301))
+        (asserts! (<= late-fee-rate u50) (err u302))
+        (ok (map-set rent-collection-settings
+            property
+            {monthly-rent: monthly-rent,
+             due-day: due-day,
+             late-fee-rate: late-fee-rate,
+             grace-period: grace-period}))))
+
+(define-public (calculate-rent-due (property principal) (tenant principal))
+    (let ((settings (unwrap! (map-get? rent-collection-settings property) (err u303)))
+          (current-month (/ stacks-block-height u144))
+          (current-status (default-to 
+            {last-payment: u0, amount-due: u0, late-fees: u0, payment-status: "current"}
+            (map-get? tenant-rent-status {property: property, tenant: tenant})))
+          (days-late (if (> stacks-block-height (+ (get last-payment current-status) (get grace-period settings)))
+                        (- stacks-block-height (+ (get last-payment current-status) (get grace-period settings)))
+                        u0))
+          (late-fee (if (> days-late u0)
+                       (/ (* (get monthly-rent settings) (get late-fee-rate settings)) u100)
+                       u0))
+          (total-due (+ (get monthly-rent settings) late-fee (get amount-due current-status))))
+        (map-set tenant-rent-status
+            {property: property, tenant: tenant}
+            {last-payment: (get last-payment current-status),
+             amount-due: total-due,
+             late-fees: (+ (get late-fees current-status) late-fee),
+             payment-status: (if (> days-late u0) "late" "current")})
+        (ok total-due)))
+
+(define-public (pay-rent (property principal))
+    (let ((sender tx-sender)
+          (settings (unwrap! (map-get? rent-collection-settings property) (err u304)))
+          (current-month (/ stacks-block-height u144))
+          (rent-status (unwrap! (map-get? tenant-rent-status {property: property, tenant: sender}) (err u305)))
+          (amount-to-pay (get amount-due rent-status)))
+        (asserts! (has-rented-property sender property) (err u306))
+        (asserts! (> amount-to-pay u0) (err u307))
+        (try! (stx-transfer? amount-to-pay sender property))
+        (map-set tenant-rent-status
+            {property: property, tenant: sender}
+            {last-payment: stacks-block-height,
+             amount-due: u0,
+             late-fees: u0,
+             payment-status: "current"})
+        (map-set rent-payment-ledger
+            {property: property, tenant: sender, month: current-month}
+            {amount-paid: amount-to-pay,
+             payment-date: stacks-block-height,
+             late-fee-charged: (get late-fees rent-status)})
+        (ok true)))
+
+(define-public (process-monthly-charges (property principal))
+    (let ((sender tx-sender)
+          (settings (unwrap! (map-get? rent-collection-settings property) (err u308))))
+        (asserts! (is-property-owner sender) (err u309))
+        (ok true)))
+
+(define-read-only (get-rent-status (property principal) (tenant principal))
+    (map-get? tenant-rent-status {property: property, tenant: tenant}))
+
+(define-read-only (get-payment-history (property principal) (tenant principal) (month uint))
+    (map-get? rent-payment-ledger {property: property, tenant: tenant, month: month}))
+
+(define-read-only (get-rent-settings (property principal))
+    (map-get? rent-collection-settings property))
+
+(define-public (waive-late-fees (property principal) (tenant principal))
+    (let ((sender tx-sender)
+          (current-status (unwrap! (map-get? tenant-rent-status {property: property, tenant: tenant}) (err u310))))
+        (asserts! (is-property-owner sender) (err u311))
+        (ok (map-set tenant-rent-status
+            {property: property, tenant: tenant}
+            (merge current-status {late-fees: u0})))))
+
+(define-public (update-rent-amount (property principal) (new-rent uint))
+    (let ((sender tx-sender)
+          (current-settings (unwrap! (map-get? rent-collection-settings property) (err u312))))
+        (asserts! (is-property-owner sender) (err u313))
+        (asserts! (> new-rent u0) (err u314))
+        (ok (map-set rent-collection-settings
+            property
+            (merge current-settings {monthly-rent: new-rent})))))

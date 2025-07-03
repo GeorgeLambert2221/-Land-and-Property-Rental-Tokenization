@@ -445,3 +445,99 @@
         (ok (map-set rent-collection-settings
             property
             (merge current-settings {monthly-rent: new-rent})))))
+
+
+(define-map authorized-validators principal uint)
+(define-map validator-stakes principal uint)
+(define-constant VALIDATOR_STAKE_REQUIRED u1000000)
+
+(define-map property-certifications 
+    principal 
+    {certified: bool,
+     validator: principal,
+     certification-date: uint,
+     expiry-date: uint,
+     cert-type: (string-ascii 20),
+     cert-hash: (buff 32)})
+
+(define-map certification-requests
+    {property: principal, request-id: uint}
+    {owner: principal,
+     validator: principal,
+     request-date: uint,
+     status: (string-ascii 10),
+     cert-type: (string-ascii 20)})
+
+(define-map request-counter principal uint)
+
+(define-public (register-validator)
+    (let ((sender tx-sender))
+        (try! (stx-transfer? VALIDATOR_STAKE_REQUIRED sender (as-contract tx-sender)))
+        (map-set validator-stakes sender VALIDATOR_STAKE_REQUIRED)
+        (ok (map-set authorized-validators sender stacks-block-height))))
+
+(define-public (request-certification (property principal) (cert-type (string-ascii 20)) (validator principal))
+    (let ((sender tx-sender)
+          (current-counter (default-to u0 (map-get? request-counter property)))
+          (new-request-id (+ current-counter u1)))
+        (asserts! (is-property-owner property) (err u400))
+        (asserts! (is-some (map-get? authorized-validators validator)) (err u401))
+        (map-set request-counter property new-request-id)
+        (ok (map-set certification-requests
+            {property: property, request-id: new-request-id}
+            {owner: sender,
+             validator: validator,
+             request-date: stacks-block-height,
+             status: "pending",
+             cert-type: cert-type}))))
+
+(define-public (approve-certification (property principal) (request-id uint) (cert-hash (buff 32)) (validity-period uint))
+    (let ((sender tx-sender)
+          (request-data (unwrap! (map-get? certification-requests {property: property, request-id: request-id}) (err u402))))
+        (asserts! (is-some (map-get? authorized-validators sender)) (err u403))
+        (asserts! (is-eq sender (get validator request-data)) (err u404))
+        (asserts! (is-eq (get status request-data) "pending") (err u405))
+        (map-set certification-requests
+            {property: property, request-id: request-id}
+            (merge request-data {status: "approved"}))
+        (ok (map-set property-certifications
+            property
+            {certified: true,
+             validator: sender,
+             certification-date: stacks-block-height,
+             expiry-date: (+ stacks-block-height validity-period),
+             cert-type: (get cert-type request-data),
+             cert-hash: cert-hash}))))
+
+(define-public (revoke-certification (property principal))
+    (let ((sender tx-sender)
+          (cert-data (unwrap! (map-get? property-certifications property) (err u406))))
+        (asserts! (is-some (map-get? authorized-validators sender)) (err u407))
+        (asserts! (is-eq sender (get validator cert-data)) (err u408))
+        (ok (map-set property-certifications
+            property
+            (merge cert-data {certified: false})))))
+
+(define-read-only (is-property-certified (property principal))
+    (let ((cert-data (map-get? property-certifications property)))
+        (match cert-data
+            some-cert (and 
+                      (get certified some-cert)
+                      (> (get expiry-date some-cert) stacks-block-height))
+            false)))
+
+(define-read-only (get-certification-details (property principal))
+    (map-get? property-certifications property))
+
+(define-read-only (get-certification-request (property principal) (request-id uint))
+    (map-get? certification-requests {property: property, request-id: request-id}))
+
+(define-read-only (is-validator (address principal))
+    (is-some (map-get? authorized-validators address)))
+
+(define-public (withdraw-validator-stake)
+    (let ((sender tx-sender)
+          (stake-amount (unwrap! (map-get? validator-stakes sender) (err u409))))
+        (map-delete authorized-validators sender)
+        (map-delete validator-stakes sender)
+        (ok (try! (as-contract (stx-transfer? stake-amount tx-sender sender))))))
